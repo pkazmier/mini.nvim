@@ -1324,10 +1324,12 @@ H.get_buf_var = function(buf_id, name)
 end
 
 -- Triggers -------------------------------------------------------------------
+H.triggers_get_all = function(buf_id) return H.expand_field('mode', H.get_config(nil, buf_id).triggers) end
+
 H.map_buf_triggers = function(buf_id)
   if not H.is_valid_buf(buf_id) or H.is_disabled(buf_id) then return end
 
-  for _, trigger in ipairs(H.get_config(nil, buf_id).triggers) do
+  for _, trigger in ipairs(H.triggers_get_all(buf_id)) do
     H.map_trigger(buf_id, trigger)
   end
 end
@@ -1335,7 +1337,7 @@ end
 H.unmap_buf_triggers = function(buf_id)
   if not H.is_valid_buf(buf_id) or H.is_disabled(buf_id) then return end
 
-  for _, trigger in ipairs(H.get_config(nil, buf_id).triggers) do
+  for _, trigger in ipairs(H.triggers_get_all(buf_id)) do
     H.unmap_trigger(buf_id, trigger)
   end
 end
@@ -1779,7 +1781,7 @@ H.clues_get_all = function(mode)
   local res = {}
 
   -- Order of clue precedence: config clues < buffer mappings < global mappings
-  local config_clues = H.clues_normalize(H.get_config().clues) or {}
+  local config_clues = H.expand_field('mode', H.clues_normalize(H.get_config().clues)) or {}
   local mode_clues = vim.tbl_filter(function(x) return x.mode == mode end, config_clues)
   for _, clue in ipairs(mode_clues) do
     local lhsraw = H.replace_termcodes(clue.keys)
@@ -1953,7 +1955,9 @@ H.is_trigger = function(x) return type(x) == 'table' and type(x.mode) == 'string
 
 H.is_clue = function(x)
   if type(x) ~= 'table' then return false end
-  local mandatory = type(x.mode) == 'string' and type(x.keys) == 'string'
+  local mode_type = type(x.mode)
+  -- Before mode expansion, `x.mode` can be a string or a table
+  local mandatory = (mode_type == 'table' or mode_type == 'string') and type(x.keys) == 'string'
   local extra = (x.desc == nil or type(x.desc) == 'string' or vim.is_callable(x.desc))
     and (x.postkeys == nil or type(x.postkeys) == 'string')
   return mandatory and extra
@@ -1973,6 +1977,17 @@ H.error = function(msg) error('(mini.clue) ' .. msg, 0) end
 H.check_type = function(name, val, ref, allow_nil)
   if type(val) == ref or (ref == 'callable' and vim.is_callable(val)) or (allow_nil and val == nil) then return end
   H.error(string.format('`%s` should be %s, not %s', name, ref, type(val)))
+end
+
+H.expand_field = function(field, items)
+  local expanded_items = {}
+  for _, item in ipairs(items) do
+    local expansions = type(item[field]) == 'table' and item[field] or { item[field] }
+    for _, expansion in ipairs(expansions) do
+      table.insert(expanded_items, vim.tbl_extend('keep', { [field] = expansion }, item))
+    end
+  end
+  return expanded_items
 end
 
 H.set_buf_name = function(buf_id, name) vim.api.nvim_buf_set_name(buf_id, 'miniclue://' .. buf_id .. '/' .. name) end
