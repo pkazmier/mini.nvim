@@ -1328,7 +1328,22 @@ H.map_buf_triggers = function(buf_id)
   if not H.is_valid_buf(buf_id) or H.is_disabled(buf_id) then return end
 
   for _, trigger in ipairs(H.get_config(nil, buf_id).triggers) do
-    H.map_trigger(buf_id, trigger)
+    -- I would normally have avoided the if statement below to minimize the
+    -- LOC with the following three lines:
+    --
+    -- local modes = type(trigger.mode) == 'table' and trigger.mode or { trigger.mode }
+    -- for _, mode in ipairs(modes) do
+    --     H.map_trigger(buf_id, mode, trigger)
+    --
+    -- But you made a comment about unnecessary table creation, so I took the
+    -- more verbose approach.
+    if type(trigger.mode) ~= 'table' then
+      H.map_trigger(buf_id, trigger.mode, trigger)
+    else
+      for _, mode in ipairs(trigger.mode) do
+        H.map_trigger(buf_id, mode, trigger)
+      end
+    end
   end
 end
 
@@ -1336,11 +1351,26 @@ H.unmap_buf_triggers = function(buf_id)
   if not H.is_valid_buf(buf_id) or H.is_disabled(buf_id) then return end
 
   for _, trigger in ipairs(H.get_config(nil, buf_id).triggers) do
-    H.unmap_trigger(buf_id, trigger)
+    -- I would normally have avoided the if statement below to minimize the
+    -- LOC with the following three lines:
+    --
+    -- local modes = type(trigger.mode) == 'table' and trigger.mode or { trigger.mode }
+    -- for _, mode in ipairs(modes) do
+    --     H.unmap_trigger(buf_id, mode, trigger)
+    --
+    -- But you made a comment about unnecessary table creation, so I took the
+    -- more verbose approach.
+    if type(trigger.mode) ~= 'table' then
+      H.unmap_trigger(buf_id, trigger.mode, trigger)
+    else
+      for _, mode in ipairs(trigger.mode) do
+        H.unmap_trigger(buf_id, mode, trigger)
+      end
+    end
   end
 end
 
-H.map_trigger = function(buf_id, trigger)
+H.map_trigger = function(buf_id, mode, trigger)
   if not H.is_valid_buf(buf_id) then return end
 
   -- Compute mapping RHS
@@ -1348,7 +1378,7 @@ H.map_trigger = function(buf_id, trigger)
   local lhs = H.keytrans(trigger.keys)
 
   local is_ministarter_map = vim.bo[buf_id].filetype == 'ministarter'
-    and vim.api.nvim_buf_call(buf_id, function() return vim.fn.maparg(lhs, trigger.mode) ~= '' end)
+    and vim.api.nvim_buf_call(buf_id, function() return vim.fn.maparg(lhs, mode) ~= '' end)
   if is_ministarter_map then return end
 
   local rhs = function()
@@ -1362,7 +1392,7 @@ H.map_trigger = function(buf_id, trigger)
     end
 
     -- Start user query
-    H.state_set(trigger, { trigger.keys })
+    H.state_set(trigger, mode, { trigger.keys })
 
     -- Do not advance if no other clues to query. NOTE: it is `<= 1` and not
     -- `<= 0` because the "init query" mapping should match.
@@ -1377,12 +1407,12 @@ H.map_trigger = function(buf_id, trigger)
   local opts = { buffer = buf_id, nowait = true, desc = desc }
 
   -- Create mapping. Use translated variant to make it work with <F*> keys.
-  vim.keymap.set(trigger.mode, lhs, rhs, opts)
+  vim.keymap.set(mode, lhs, rhs, opts)
 end
 
-H.unmap_trigger = function(buf_id, trigger)
+H.unmap_trigger = function(buf_id, mode, trigger)
   if not H.is_valid_buf(buf_id) then return end
-  pcall(vim.keymap.del, trigger.mode, H.keytrans(trigger.keys), { buffer = buf_id })
+  pcall(vim.keymap.del, mode, H.keytrans(trigger.keys), { buffer = buf_id })
 end
 
 -- State ----------------------------------------------------------------------
@@ -1439,13 +1469,15 @@ H.state_advance = function(opts)
   H.state_exec()
 end
 
-H.state_set = function(trigger, query)
+H.state_set = function(trigger, mode, query)
+  H.state.mode = mode
   H.state.trigger = trigger
   H.state.query = query
-  H.state.clues = H.clues_filter(H.clues_get_all(trigger.mode), query)
+  H.state.clues = H.clues_filter(H.clues_get_all(mode), query)
 end
 
 H.state_reset = function(keep_window)
+  H.state.mode = ''
   H.state.trigger = nil
   H.state.query = {}
   H.state.clues = {}
@@ -1460,7 +1492,7 @@ H.state_exec = function()
   local keys_to_type = H.compute_exec_keys()
 
   -- Add extra (redundant) safety flag to try to avoid infinite recursion
-  local trigger, clue = H.state.trigger, H.state_get_query_clue()
+  local mode, trigger, clue = H.state.mode, H.state.trigger, H.state_get_query_clue()
   H.exec_trigger = trigger
   vim.schedule(function() H.exec_trigger = nil end)
 
@@ -1472,7 +1504,7 @@ H.state_exec = function()
   -- This is a workaround against infinite recursion (like if `g` is trigger
   -- then typing `gg`/`g~` would introduce infinite recursion).
   local buf_id = vim.api.nvim_get_current_buf()
-  H.unmap_trigger(buf_id, trigger)
+  H.unmap_trigger(buf_id, mode, trigger)
 
   -- Execute keys. The `i` flag is used to fully support Operator-pending mode.
   -- Flag `t` imitates keys as if user typed, which is reasonable but has small
@@ -1481,7 +1513,7 @@ H.state_exec = function()
   vim.api.nvim_feedkeys(keys_to_type, 'mit', false)
 
   -- Enable trigger back after it can no longer harm
-  vim.schedule(function() H.map_trigger(buf_id, trigger) end)
+  vim.schedule(function() H.map_trigger(buf_id, mode, trigger) end)
 
   -- Apply postkeys (in scheduled fashion)
   if has_postkeys then H.state_apply_postkeys(clue.postkeys) end
@@ -1780,7 +1812,8 @@ H.clues_get_all = function(mode)
 
   -- Order of clue precedence: config clues < buffer mappings < global mappings
   local config_clues = H.clues_normalize(H.get_config().clues) or {}
-  local mode_clues = vim.tbl_filter(function(x) return x.mode == mode end, config_clues)
+  local mode_filter = function(x) return type(x.mode) == 'table' and vim.list_contains(x.mode, mode) or x.mode == mode end
+  local mode_clues = vim.tbl_filter(mode_filter, config_clues)
   for _, clue in ipairs(mode_clues) do
     local lhsraw = H.replace_termcodes(clue.keys)
 
@@ -1953,7 +1986,8 @@ H.is_trigger = function(x) return type(x) == 'table' and type(x.mode) == 'string
 
 H.is_clue = function(x)
   if type(x) ~= 'table' then return false end
-  local mandatory = type(x.mode) == 'string' and type(x.keys) == 'string'
+  local mode_type = type(x.mode)
+  local mandatory = (mode_type == 'string' or mode_type == 'table') and type(x.keys) == 'string'
   local extra = (x.desc == nil or type(x.desc) == 'string' or vim.is_callable(x.desc))
     and (x.postkeys == nil or type(x.postkeys) == 'string')
   return mandatory and extra
